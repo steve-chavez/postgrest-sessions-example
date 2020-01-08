@@ -256,7 +256,7 @@ We will grant selective permissions to our API:
 grant select(user_id, name, email), update(name, email, password)
     on table app.users
     to api;
-    
+
 ```
 
 

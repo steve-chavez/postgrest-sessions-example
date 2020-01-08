@@ -105,7 +105,7 @@ comment on role webuser is
 ```
 
 The comments will be useful to users working with our schema, both in GUI
-applications and with `psql` meta commands, e.g. `\d`.
+applications and with `psql` meta commands, e.g. `\d...`.
 
 We need to allow the authenticator role to switch to the other roles:
 
@@ -154,7 +154,7 @@ execute functions have to be explicitly granted using `grant execute on function
 statements.
 
 We also need to remove the default execute privileges from the `api` role, as the
-default applies per user.
+defaults apply per user.
 
 ```sql
 alter default privileges for role api revoke execute on functions from public;
@@ -165,7 +165,8 @@ alter default privileges for role api revoke execute on functions from public;
 ## App
 
 The `app` schema will contain the current state and business logic of the
-application. We will define the API in a separate `api` schema later.
+application. We will define our API in a separate `api` schema later and 
+isolate all PostgREST specific parts there.
 
 ```sql
 \echo 'Creating the app schema...'
@@ -289,9 +290,9 @@ comment on column app.todos.public is
 
 ```
 
-Our API will get full access to the `todo` table:
+Our API will get access to the `todo` table:
 
-```
+```sql
 grant
         select, 
         insert(user_id, description, public),
@@ -305,10 +306,22 @@ grant
 Web users will also need access to the sequence of the `todos` primary key,
 so that they can insert new rows:
 
-```
+```sql
 grant all on app.todos_todo_id_seq to webuser;
 
 ```
+
+This seems to work without actually granting the role
+`usage` on this schema.
+
+> Note on permissions:
+>
+> A pragmatic way to figure out the required permission grants
+> is to start with a locked down setup (as we will do here with 
+> separated schemas and roles, Row Level Security and revoked default
+> permissions), write tests for your application (be it unit tests
+> in the database, see below, or integration tests) and running them 
+> and adding permissions step by step until everything works.
 
 
 ### Sessions
@@ -720,11 +733,9 @@ We'll check with tests if we got it right in the end.
 
 ### Authentication hook
 
-TODO: The auth hook should not be exposed with the API
-
-For each request, PostgREST will provide cookie values under the 
-`request.cookie.*` variables. In this authentication hook, we will 
-read the `session_token` cookie, if it exists. The function
+For each request, PostgREST will provide cookie values in the 
+`request.cookie.*` variables. In the authentication hook that we define 
+below, we will read the `session_token` cookie, if it exists. The function
 will switch roles and set the appropriate `user_id` if the session as
 identified by the token is valid.
 
@@ -766,6 +777,13 @@ settings between requests. Those variants set variables that are valid
 only for the current transaction and PostgREST runs each request in its own
 transaction.
 
+> Note on developing functions
+> 
+> As with permissions, it usually makes sense to develop functions step by step and
+> to iterate on them using tests. For 'print statement debugging' in `plpgsql` functions, 
+> you can use statements like `raise warning 'Test: %', var;`, where `var` is a variable
+> that will be formatted into the string at `%`.
+
 We will configure PostgREST to run this function before every request in
 [`postgrest.conf`](postgrest.conf) using `pre-request = "api.authenticate"`.
 
@@ -780,7 +798,8 @@ table in our API.
 create view api.users as
     select
         user_id,
-        name
+        name,
+        email
     from
         app.users;
 
@@ -789,7 +808,7 @@ create view api.users as
 We grant webusers selective permissions on that view:
 
 ```sql
-grant select, update(name) on api.users to webuser;
+grant select(user_id, name), update(name) on api.users to webuser;
 
 ```
 
@@ -802,6 +821,8 @@ create type api.user as (
     name text,
     email citext
 );
+
+-- TODO: this could probably be a simpler sql function
 
 create function api.current_user()
     returns api.user
@@ -834,6 +855,7 @@ grant execute on function api.current_user to webuser;
 ### Login API endpoint
 
 The `api.login` endpoint wraps the `app.login` function to add the following:
+
 * Raise an exception if the given login credentials are not valid.
 * Add a header to the response to set a cookie with the session token.
 
@@ -850,6 +872,7 @@ create function api.login(email text, password text)
             select app.login(email, password) into session_token;
             if session_token is null then
                 raise exception 'invalid login';
+                -- TODO: return the correct HTTP status using a PostgREST exception
             end if;
 
             perform set_config(
@@ -870,13 +893,20 @@ grant execute on function api.login to anonymous;
 ```
 
 The `response.headers` setting will be read by PostgREST as a JSON list of
-headers, which it will then set as headers in its HTTP response.
+headers when the transaction completes, which it will then set as headers 
+in its HTTP response.
+
+For this example, we set the cookie to expire after 600s or 10 minutes. This is a 
+conservative value that is shorter than the session duration according to our
+business logic. Our frontend clients should refresh the session regularly 
+as long as the user is active.
 
 
 ### Refresh session API endpoint
 
-In addition to `app.refresh_session`, `api.refresh_session` will update the
-lifetime of the cookie.
+In addition to the `refresh_session` function in `app`, the 
+`api.refresh_session` variant will also update the lifetime
+of the session cookie.
 
 ```sql
 create function api.refresh_session()
@@ -887,7 +917,7 @@ create function api.refresh_session()
         declare
             session_token text;
         begin
-            select current_setting('request.cookie.session_token', true)
+            select current_setting('request.cookie.session_token', false)
                 into strict session_token;
 
             perform app.refresh_session(session_token);
@@ -908,6 +938,9 @@ comment on function api.refresh_session is
 grant execute on function api.refresh_session to webuser;
 
 ```
+
+See the [login endpoint](#login-api-endpoint) regarding the cookie
+lifetime.
 
 
 ### Logout API endpoint
@@ -963,6 +996,11 @@ create function api.register(email text, name text, password text)
 comment on function api.register is
     'Registers a new user and creates a new session for that account.';
 
+```
+
+Only unauthenticated users should be able to register:
+
+```sql
 grant execute on function api.register to anonymous;
 
 ```
@@ -988,8 +1026,8 @@ comment on view api.todos is
 
 ```
 
-Webusers should be able to view, create, update and delete Todo items, with the
-restrictions that we set in the Row Level Security policies.
+Webusers should be able to view, create, update and delete todo items, with the
+restrictions that we previously set in the Row Level Security policies.
 
 ```
 grant select, insert, update(description, done), delete on api.todos to webuser;

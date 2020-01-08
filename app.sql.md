@@ -455,41 +455,6 @@ grant execute on function app.login to api;
 ```
 
 
-### Session User-ID
-
-We will need to get the `user_id` of the currently authenticated user
-given a session token in our API. We will provide this functionality 
-through a `security definer` function that will run with the 
-permissions of the superuser.
-
-```sql
-create function app.session_user_id(session_token text)
-    returns integer
-    language sql
-    security definer
-    as $$
-        select user_id
-            from app.active_sessions
-            where token = session_token;
-    $$;
-    
-comment on app.session_user_id is
-    'Id of the user currently authenticated with the given session token';
-
-```
-
-The authenticator role will need to access this function in order to authenticate
-our users:
-
-```sql
-grant execute on function app.session_user_id to authenticator;
-
-```
-
-The query in this function will be efficient based on the primary key
-index on `token`.
-
-
 ### Refresh session
 
 To refresh session, we update the expiry time in the respective record:
@@ -563,6 +528,41 @@ comment on function app.register is
 grant execute on function app.register to api;
 
 ```
+
+
+### Session User-ID
+
+In our authentication hook `app.authenticate`, we will need to get the `user_id`
+of the currently authenticated user given a session token. We will expose this 
+privileged functionality through a `security definer` function that will run with
+the permissions of the superuser.
+
+```sql
+create function app.session_user_id(session_token text)
+    returns integer
+    language sql
+    security definer
+    as $$
+        select user_id
+            from app.active_sessions
+            where token = session_token;
+    $$;
+    
+comment on app.session_user_id is
+    'Id of the user currently authenticated with the given session token';
+
+```
+
+The authenticator role will need to access this function in order to authenticate
+our users:
+
+```sql
+grant execute on function app.session_user_id to authenticator;
+
+```
+
+The query in this function will be efficient based on the primary key
+index on `token`.
 
 
 ### Row Level Security and Policies

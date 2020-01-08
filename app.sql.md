@@ -589,7 +589,7 @@ schema are owned by the superuser.
 
 #### Helper function: Current `user_id`
 
-Our Row Level Security policy functions will need to access the `user_id` of
+Our Row Level Security policies will need to access the `user_id` of
 the currently authenticated user. See `api.authenticate` for the function that
 sets the value as a local setting.
 
@@ -661,7 +661,20 @@ create policy webuser_write_todo
 ```
 
 
-# API
+### Permission of the `api` role on the `app` schema
+
+The views owned by the api schema will be executed with its permissions,
+regardless of who is using the views. Accordingly, we grant the api role
+access to the data schema, but restrict access through the row level
+security policies.
+
+```sql
+grant usage on schema app to authenticator, api;
+
+```
+
+
+## API
 
 The `api` schema defines an API on top of our application that will be exposed
 to PostgREST. We could define several different APIs or maintain an API even
@@ -681,20 +694,7 @@ Based on the `authorization` option, the newly created `api` schema will be
 owned by the `api` role.
 
 
-## Permission of the `api` role on the `app` schema
-
-The views owned by the api schema will be executed with its permissions,
-regardless of who is using the views. Accordingly, we grant the api role
-access to the data schema, but restrict access through the row level
-security policies.
-
-```sql
-grant usage on schema app to authenticator, api;
-
-```
-
-
-## Switch to `api` role
+### Switch to `api` role
 
 All following views and functions should be owned by the `api` role. The
 easiest way to achieve this is to switch to it for now:
@@ -711,7 +711,49 @@ executed with the permissions of the superuser and bypass Row Level security.
 We'll check with tests if we got it right in the end.
 
 
-## Users API endpoint
+### Session-based authentication
+
+PostgREST will provide cookie values under the `request.cookie.*` variables. In
+this case, we will read the `session_token` cookie, if it exists. The function
+will switch roles and set the appropriate `user_id` if the session as
+identified by the token is valid.
+
+```sql
+create function api.authenticate()
+    returns void
+    language plpgsql
+    as $$
+        declare
+            session_token text;
+            session_user_id int;
+        begin
+            select current_setting('request.cookie.session_token', true)
+                into session_token;
+
+            select app.session_user_id(session_token)
+                into session_user_id;
+
+            if session_user_id is not null then
+                set local role to webuser;
+                perform set_config('app.user_id', session_user_id::text, true);
+            else
+                set local role to anonymous;
+            end if;
+        end;
+    $$;
+
+comment on function api.authenticate is
+    'Sets the role and user_id based on the session token given as a cookie.';
+
+grant execute on function api.authenticate to authenticator;
+
+```
+
+We will configure PostgREST to run this function before every request in
+`postgrest.conf` using `pre-request = "api.authenticate"`.
+
+
+### Users API endpoint
 
 We don't want our users to be able to access fields like `password` from
 `app.users`. We can filter the columns in the view with which we expose that
@@ -771,49 +813,7 @@ grant execute on function api.current_user to webuser;
 ```
 
 
-## Session-based authentication
-
-PostgREST will provide cookie values under the `request.cookie.*` variables. In
-this case, we will read the `session_token` cookie, if it exists. The function
-will switch roles and set the appropriate `user_id` if the session as
-identified by the token is valid.
-
-```sql
-create function api.authenticate()
-    returns void
-    language plpgsql
-    as $$
-        declare
-            session_token text;
-            session_user_id int;
-        begin
-            select current_setting('request.cookie.session_token', true)
-                into session_token;
-
-            select app.session_user_id(session_token)
-                into session_user_id;
-
-            if session_user_id is not null then
-                set local role to webuser;
-                perform set_config('app.user_id', session_user_id::text, true);
-            else
-                set local role to anonymous;
-            end if;
-        end;
-    $$;
-
-comment on function api.authenticate is
-    'Sets the role and user_id based on the session token given as a cookie.';
-
-grant execute on function api.authenticate to authenticator;
-
-```
-
-We will configure PostgREST to run this function before every request in
-`postgrest.conf` using `pre-request = "api.authenticate"`.
-
-
-## Login API endpoint
+### Login API endpoint
 
 The `api.login` endpoint wraps the `app.login` function to add the following:
 * Raise an exception if the given login credentials are not valid.
@@ -855,7 +855,7 @@ The `response.headers` setting will be read by PostgREST as a JSON list of
 headers, which it will then set as headers in its HTTP response.
 
 
-## Refresh session API endpoint
+### Refresh session API endpoint
 
 In addition to `app.refresh_session`, `api.refresh_session` will update the
 lifetime of the cookie.
@@ -892,7 +892,7 @@ grant execute on function api.refresh_session to webuser;
 ```
 
 
-## Logout API endpoint
+### Logout API endpoint
 
 `api.logout` will expire the session using `app.logout` and unset the session
 cookie.
@@ -950,7 +950,7 @@ grant execute on function api.register to anonymous;
 ```
 
 
-## Todos API endpoint
+### Todos API endpoint
 
 ```sql
 create view api.todos as
@@ -977,7 +977,7 @@ grant all on api.todos to webuser;
 
 ```
 
-## Grant users access to the `api` schema
+### Grant users access to the `api` schema
 
 The user roles need the `usage` permission on the `api` schema before they can
 do anything with it:
@@ -988,7 +988,7 @@ grant usage on schema api to authenticator, anonymous, webuser;
 ```
 
 
-## Resetting role
+### Resetting role
 
 Now that the API is fully described in the `api` schema, we switch back to the
 superuser role.
@@ -999,7 +999,7 @@ reset role;
 ```
 
 
-# Finishing up
+## Finalize àpplication setup
 
 We are done with defining the application and commit all changes:
 
@@ -1009,7 +1009,7 @@ commit;
 ```
 
 
-# Tests
+## Tests
 
 We need to make sure that the permissions and policies that we set up actually
 work. The following tests will be maintained with the database schema and can
@@ -1023,6 +1023,9 @@ begin;
 create schema tests;
 
 ```
+
+
+### Helper function for impersonating users
 
 We will need to repeatedly impersonate users for our tests, lets define a helper
 function to help us with that:
@@ -1042,6 +1045,9 @@ comment on function tests.impersonate is
     'Impersonate the given role and user.';
 
 ```
+
+
+### Test schema
 
 We will use [pgTAP](https://pgtap.org/) functions to describe our tests. You'll
 find a full listing of the assertions functions you can user in the [pgTAP
@@ -1095,6 +1101,9 @@ comment on function tests.test_schemas is
     'Test that the schemas and the access to them is set up correctly.';
 
 ```
+
+
+### Test authorization functions
 
 Test the authorization functions:
 
@@ -1239,6 +1248,9 @@ create function tests.test_auth()
 
 ```
 
+
+### Test memberships
+
 The `authenticator` role needs to be granted the `anonymous` and `webuser`
 roles.
 
@@ -1257,6 +1269,9 @@ comment on function tests.test_roles is
     'Make sure that the roles are set up correctly.';
 
 ```
+
+
+### Define a test runner
 
 Finally, we load the `pgtap` extension and set up a function that runs all
 tests.
@@ -1278,6 +1293,9 @@ create function tests.run()
 commit;
 
 ```
+
+
+### Run all tests
 
 Run all tests:
 
@@ -1301,7 +1319,7 @@ setval('app.users_user_id_seq', max(user_id)) from app.users;` if we cared
 about that.
 
 
-# Fixtures
+## Fixtures
 
 Any fixtures can be added here.
 

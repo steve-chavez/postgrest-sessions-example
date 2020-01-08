@@ -250,6 +250,15 @@ The trigger function returns a record that will be used instead of `new`.
 The trigger we defined here will fire on any change of the `password` field and
 make sure that only salted and hashed passwords are saved in the database.
 
+We will grant selective permissions to our API:
+
+```sql
+grant select(user_id, name, email), update(name, email, password)
+    on table app.users
+    to api;
+    
+```
+
 
 ### Todos
 
@@ -274,6 +283,27 @@ comment on table app.todos is
 
 comment on column app.todos.public is
     'Todo item will be visible to all users if public.';
+
+```
+
+Our API will get full access to the `todo` table:
+
+```
+grant
+        select, 
+        insert(user_id, description, public),
+        update(description, done, public),
+        delete
+    on table app.todos
+    to api;
+
+```
+
+Web users will also need access to the sequence of the `todos` primary key,
+so that they can insert new rows:
+
+```
+grant all on app.todos_todo_id_seq to webuser;
 
 ```
 
@@ -357,26 +387,6 @@ You could create a separate role with limited privileges to execute this query,
 granting it just `usage` on the `app` schema and `execute` on this function.
 
 
-### Enable Row Level Security
-
-We want to make sure that users and todos can only be accessed by who is
-supposed to have access to them. As a first step, we are going to lock the
-tables in the `app` schema down completely using Row Level Security:
-
-```sql
-alter table app.users enable row level security;
-alter table app.todos enable row level security;
-alter table app.sessions enable row level security;
-
-```
-
-As of now, no user will be able to access any row in the `app` schema, with
-the exception of the superuser. We will grant granular access to individual
-roles using `policies`. As the superuser usually overrides Row Level Security,
-we will need to make sure that no functions or views that access the `app`
-schema are owned by the superuser.
-
-
 ### Login
 
 We define a login function that we will be able to use in our API:
@@ -437,11 +447,20 @@ defined for the `token` column in the `app.sessions` table. If no new session
 has been created, i.e. because the credentials weren't valid, then `null` will
 be returned.
 
+Our API needs to be able to use this function:
+
+```sql
+grant execute on function app.login to api;
+
+```
+
 
 ### Session User-ID
 
-Our API will need to get we will create a `security definer` function that will
-return a `user_id` if their is an active session as identified as a token.
+We will need to get the `user_id` of the currently authenticated user
+given a session token in our API. We will provide this functionality 
+through a `security definer` function that will run with the 
+permissions of the superuser.
 
 ```sql
 create function app.session_user_id(session_token text)
@@ -453,13 +472,23 @@ create function app.session_user_id(session_token text)
             from app.active_sessions
             where token = session_token;
     $$;
+    
+comment on app.session_user_id is
+    'Id of the user currently authenticated with the given session token';
 
+```
+
+The authenticator role will need to access this function in order to authenticate
+our users:
+
+```sql
 grant execute on function app.session_user_id to authenticator;
 
 ```
 
 The query in this function will be efficient based on the primary key
 index on `token`.
+
 
 ### Refresh session
 
@@ -475,11 +504,19 @@ create function app.refresh_session(session_token text)
             set expires = default
             where token = session_token and expires > clock_timestamp()
     $$;
+    
+comment on function app.register is
+    'Extend the expiration time of the given session.';
 
 ```
 
 We cannot use the `app.active_sessions` view here, as the column default on
 expires from the table `app.sessions` is not available in the view.
+
+```sql
+grant execute on function app.refresh_session to api;
+
+```
 
 
 ### Logout
@@ -496,6 +533,11 @@ create function app.logout(token text)
             set expires = clock_timestamp()
             where token = logout.token
     $$;
+
+comment on function app.register is
+    'Expire the given session.';
+
+grant execute on function app.logout to api;
 
 ```
 
@@ -518,15 +560,38 @@ create function app.register(email text, name text, password text)
 comment on function app.register is
     'Create a new account with the given email, name and password.';
 
+grant execute on function app.register to api;
+
 ```
 
 
-### Policies
+### Row Level Security and Policies
 
-#### Helper functions for User-IDs
+#### Enable Row Level Security
+
+We want to make sure that users, todos and sessions can only be accessed by who is
+supposed to have access to them. As a first step, we are going to lock the
+tables in the `app` schema down completely using Row Level Security:
+
+```sql
+alter table app.users enable row level security;
+alter table app.todos enable row level security;
+alter table app.sessions enable row level security;
+
+```
+
+As of now, no user will be able to access any row in the `app` schema, with
+the exception of the superuser. We will grant granular access to individual
+roles using `policies`. As the superuser usually overrides Row Level Security,
+we will need to make sure that no functions or views that access the `app`
+schema are owned by the superuser.
+
+
+#### Helper function: Current `user_id`
 
 Our Row Level Security policy functions will need to access the `user_id` of
-the currently authenticated user.
+the currently authenticated user. See `api.authenticate` for the function that
+sets the value as a local setting.
 
 ```sql
 create function app.current_user_id()
@@ -538,6 +603,13 @@ create function app.current_user_id()
 
 comment on function app.current_user_id is
     'User_id of the currently authenticated user, or null if not authenticated.';
+
+```
+
+We need to grant users that benefit from policies access to this function:
+
+```sql
+grant execute on function app.current_user_id to api, webuser;
 
 ```
 
@@ -618,26 +690,6 @@ security policies.
 
 ```sql
 grant usage on schema app to authenticator, api;
-
-grant select(user_id, name, email), update(name, email, password)
-    on table app.users
-    to api;
-
-grant all on table app.todos to api;
-
-grant execute on function
-        app.login,
-        app.refresh_session,
-        app.logout,
-        app.register,
-        app.session_user_id,
-        app.current_user_id
-    to api;
-
-grant execute on function app.session_user_id to authenticator;
-
-grant execute on function app.current_user_id to webuser;
-grant all on app.todos_todo_id_seq to webuser;
 
 ```
 

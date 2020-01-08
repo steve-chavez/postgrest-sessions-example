@@ -606,10 +606,11 @@ comment on function app.current_user_id is
 
 ```
 
-We need to grant users that benefit from policies access to this function:
+We need to grant the roles that benefit from policies access to this function:
 
 ```sql
 grant execute on function app.current_user_id to api, webuser;
+-- TODO: check that webuser actually needs the permission
 
 ```
 
@@ -636,14 +637,15 @@ Policies can be created for specific roles using a `to` clause, e.g.
 `create policy webuser_read_user to webuser for ...`. This would, however, not
 work for our use-case. We will define views in a separate API schema that will
 be owned by the `api` role. When a `webuser` uses those views, the policy checks
-would be run against the role of the view owner, `api`. `current_user` always
-refers to the current role, so we use this instead.
+would be run against the role of the view owner, `api`. `current_setting('role')`
+always refers to the current role that was set with `set local role ...`, so we 
+use this instead.
 
 
 #### Access to `app.todos`
 
-Users should be able to read todo items that they own or that are public:
-Users should only be able to write their own todos:
+Users should be able to read todo items that they own or that are public.
+They should only be able to write their own todo items.
 
 ```sql
 create policy webuser_read_todo
@@ -750,7 +752,7 @@ grant execute on function api.authenticate to authenticator;
 ```
 
 We will configure PostgREST to run this function before every request in
-`postgrest.conf` using `pre-request = "api.authenticate"`.
+[`postgrest.conf`](postgrest.conf) using `pre-request = "api.authenticate"`.
 
 
 ### Users API endpoint
@@ -776,7 +778,8 @@ grant select, update(name) on api.users to webuser;
 
 ```
 
-Each user should be able to get more details on his own account.
+Each user should be able to get more details on his own account. We will
+restrict the user's access by defining a function for that purpose:
 
 ```sql
 create type api.user as (
@@ -952,6 +955,8 @@ grant execute on function api.register to anonymous;
 
 ### Todos API endpoint
 
+We will expose the todo items through a view:
+
 ```sql
 create view api.todos as
     select
@@ -968,14 +973,14 @@ comment on view api.todos is
 
 ```
 
-Webusers should be able to create, update and delete Todo items, with the
+Webusers should be able to view, create, update and delete Todo items, with the
 restrictions that we set in the Row Level Security policies.
 
 ```
-grant insert, update(description, done), delete on api.todos to webuser;
-grant all on api.todos to webuser;
+grant select, insert, update(description, done), delete on api.todos to webuser;
 
 ```
+
 
 ### Grant users access to the `api` schema
 
@@ -1025,7 +1030,7 @@ create schema tests;
 ```
 
 
-### Helper function for impersonating users
+### Helper function for impersonating users in tests
 
 We will need to repeatedly impersonate users for our tests, lets define a helper
 function to help us with that:
@@ -1047,7 +1052,7 @@ comment on function tests.impersonate is
 ```
 
 
-### Test schema
+### Test our schema setup
 
 We will use [pgTAP](https://pgtap.org/) functions to describe our tests. You'll
 find a full listing of the assertions functions you can user in the [pgTAP
@@ -1249,7 +1254,7 @@ create function tests.test_auth()
 ```
 
 
-### Test memberships
+### Test role memberships
 
 The `authenticator` role needs to be granted the `anonymous` and `webuser`
 roles.
@@ -1271,7 +1276,7 @@ comment on function tests.test_roles is
 ```
 
 
-### Define a test runner
+### Finalize the test setup
 
 Finally, we load the `pgtap` extension and set up a function that runs all
 tests.
@@ -1297,7 +1302,7 @@ commit;
 
 ### Run all tests
 
-Run all tests:
+Run all tests in a transaction that will be rolled back:
 
 ```sql
 begin;

@@ -58,22 +58,6 @@ a valuable feature of PostgREST not available in most other relational
 databases.
 
 
-### Revoke default execute privileges on functions
-
-By default, all database users (identified by the role `PUBLIC`, which is
-granted to all roles by default) have privileges to execute any function. To be
-safe, we are going to change this default:
-
-```sql
-alter default privileges revoke execute on functions from public;
-
-```
-
-Now, for all functions created in this database, permissions to execute
-functions have to be explicitly granted using `grant execute on function ...`
-statements.
-
-
 ### Create extensions
 
 In this application, we are going to use the `pgcrypto` extension to salt and
@@ -136,6 +120,9 @@ Alternatively, you can use the `psql` meta command `\password authenticator`
 interactively, which will make sure that the password does not appear In any
 logs or history files.
 
+
+### API role
+
 The `api` role will own the api schema and the the views and functions living in
 it.
 
@@ -147,16 +134,32 @@ comment on role api is
 
 ```
 
-We also need to remove the default execute privileges from that user, as the
+You might choose to add more roles and even separate APIs with fine grained
+privileges when your application grows.
+
+
+### Revoke default execute privileges on newly defined functions
+
+By default, all database users (identified by the role `PUBLIC`, which is
+granted to all roles by default) have privileges to execute any function that 
+we define. To be safe, we are going to change this default:
+
+```sql
+alter default privileges revoke execute on functions from public;
+
+```
+
+Now, for all functions created in this database by the superuser, permissions to 
+execute functions have to be explicitly granted using `grant execute on function ...`
+statements.
+
+We also need to remove the default execute privileges from the `api` role, as the
 default applies per user.
 
 ```sql
 alter default privileges for role api revoke execute on functions from public;
 
 ```
-
-You might choose to add more roles and even separate APIs with fine grained
-privileges when your application grows.
 
 
 ## App

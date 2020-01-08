@@ -251,6 +251,10 @@ arguments, including:
 
 The trigger function returns a record that will be used instead of `new`.
 
+The `begin` and `end` keywords have nothing to do with transactions, they are just 
+special `plpgsql` syntax. There is also an optional `declare` section that can be used
+before `begin` to declare variables, as we will see later.
+
 The trigger we defined here will fire on any change of the `password` field and
 make sure that only salted and hashed passwords are saved in the database.
 
@@ -263,11 +267,18 @@ grant select(user_id, name, email), update(name, email, password)
 
 ```
 
+We could also grant those permissions in a separate section in order
+to ceompletely decouple the API from this schema,
+but it seems more practicable to keep the permission grants
+close to the definition of each object.
+
 
 ### Todos
 
-This example application will manage todo items. In order to demonstrate the
-permissions and Row Level Security mechanisms, we will make them visible to
+In this example application we will manage todo items, as they are simple and still
+well suited to demonstrate the security mechanisms and 
+PostgREST features. Let's say that, in order to show the
+permissions and Row Level Security mechanisms, we want to make the items visible to
 their owner and, if they are set as public, to anyone.
 
 ```sql
@@ -290,7 +301,10 @@ comment on column app.todos.public is
 
 ```
 
-Our API will get access to the `todo` table:
+The unique contraint will make sure, that each user can only have 
+one todo item with a specific title.
+
+Our API will get access to the `app.todo` table:
 
 ```sql
 grant
@@ -349,7 +363,9 @@ comment on column app.sessions.expires is
 ```
 
 The `token` column will be generated automatically based on 32 random bytes
-from the `pgcrypto` module.
+from the `pgcrypto` module, while will then be base64 encoded. We could also store
+the raw bytes in a `bytea` column, saving a bit of space, and handle the encoding and
+decoding in the API, but this is much simpler and good enough for now.
 
 `expires` will be set to the time 15 minutes into the future by default. You
 can change this default with `alter column app.sessions.expires set default to
@@ -357,8 +373,12 @@ clock_timestamp() + '...'::interval;`.  The function `clock_timestamp()` will
 always return the current time, independent from when the current transaction
 started.
 
-In our application, only the active sessions will be of interest in most cases.
-We create a view that identifies them reliably and that we will be able to build
+We use a check contraint here to have the database maintain some invariants on our
+data, like that a session should not expire before it was created. With good contraints,
+we can prevent whole classes of bugs in our application.
+
+In most places in our application, only the active sessions will be of interest.
+We will create a view that identifies them reliably and that we will be able to build
 upon later.
 
 ```sql
@@ -385,7 +405,7 @@ create index on app.sessions (expires);
 
 ```
 
-To clean up expired sessions, you can periodically run the following function:
+To clean up expired sessions, we can periodically run the following function:
 
 ```sql
 create function app.clean_sessions()
@@ -399,13 +419,15 @@ create function app.clean_sessions()
 
 ```
 
-You could create a separate role with limited privileges to execute this query,
-granting it just `usage` on the `app` schema and `execute` on this function.
+To run this function regularly, we could create a separate role with limited 
+privileges, granting it just `usage` on the `app` schema and `execute` on this function,
+that cron job will be able to login as.
 
 
 ### Login
 
-We define a login function that we will be able to use in our API:
+We define a login function that creates a new session, using many of the defaults
+that we set in the `sessions` table.
 
 ```sql
 create function app.login(email text, password text)
@@ -429,27 +451,28 @@ comment on function app.login is
 
 There is a lot happening here, so we'll go through it step by step.
 
-The login function takes two parameters of type text, `email` and `password`,
-and returns a scalar value of type text.
+The login function takes two parameters of type `text`, email and password,
+and returns a scalar value of type `text`.
 
 `language sql` means that the function body will be a regular SQL query. We try
-to use regular SQL queries where possible, as they can be optimized the most by
+to use SQL queries where possible, as they can be optimized the most by
 the query planner of PostgreSQL. If we are not able to express a function in
 regular SQL, we'll use the more complex and flexible `plpgsql` procedural
 language.
 
 `security definer` means that the function will run the permissions of the owner
 of the function (i.e. `auth` is this case), and not the permissions of the
-caller.
+caller. This can create security risks if misused, but also gives us the opportunity
+to isolate and manage privileged actions used properly.
 
 `$$` is an alternative syntax for starting and ending strings, with the
 advantage that almost nothing needs to be escaped within this kind of string.
 
 The function body will create a new session if it finds a user_id that matches
 the given credentials. It creates a new session token and expiry time based
-on the defaults set in the table and returns the new session token.
+on the defaults that we in the table and returns the new session token.
 
-Inserting into the app.active_sessions view is possible, as it is simple enough
+Inserting into the `app.active_sessions` view is possible, as it is simple enough
 for PostgreSQL to transparently translate it into an insert into `app.sessions`
 (see: updatable views).
 
@@ -457,6 +480,8 @@ The arguments given to the function can be accessed by the names given in the
 function definition. In order to disambiguate them from the columns of the
 `app.active_sessions` view, we can prefix them with the name of the function,
 `login` in this case (without the schema).
+
+TODO: Do we actually get any benefits from this here?
 
 The returned token is generated automatically based on the default value
 defined for the `token` column in the `app.sessions` table. If no new session
@@ -525,6 +550,8 @@ grant execute on function app.logout to api;
 
 ### Register
 
+TODO: easier to grant insert(email, name, password) to api?
+
 Our users will need to create accounts:
 
 ```sql
@@ -548,7 +575,7 @@ grant execute on function app.register to api;
 
 ### Session User-ID
 
-In our authentication hook `app.authenticate`, we will need to get the `user_id`
+In our authentication hook `api.authenticate`, we will need to get the `user_id`
 of the currently authenticated user given a session token. We will expose this 
 privileged functionality through a `security definer` function that will run with
 the permissions of the superuser.
@@ -578,7 +605,7 @@ grant execute on function app.session_user_id to authenticator;
 ```
 
 The query in this function will be efficient based on the primary key
-index on `token`.
+index on the `token` column.
 
 
 ### Row Level Security and Policies
@@ -708,10 +735,11 @@ comment on schema api is
 
 ```
 
-Based on the `authorization` option, the newly created `api` schema will be
+By using the `authorization` keyword, the newly created `api` schema will be
 owned by the `api` role.
 
-The API functions will also take care of all reading and setting of cookies.
+We will handle any PostgREST specific stuff here,
+especially the reading and setting of cookies.
 
 
 ### Switch to `api` role

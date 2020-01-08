@@ -19,7 +19,7 @@ of session based authentication:
 * Definition of the [`app.sessions` table](#sessions) and `app.active_sessions`
   view.
 * Auth functions defined in the [`app` schema](#login).
-* The [`authentication` function](#session-based-authentication) that should be
+* The [`authenticate` function](#authentication-hook) that should be
   set up as the `pre-request` hook in PostgREST.
 * Auth API endpoints in the [`apí` schema](#login-api-endpoint).
 
@@ -698,6 +698,8 @@ comment on schema api is
 Based on the `authorization` option, the newly created `api` schema will be
 owned by the `api` role.
 
+The API functions will also take care of all reading and setting of cookies.
+
 
 ### Switch to `api` role
 
@@ -716,10 +718,13 @@ executed with the permissions of the superuser and bypass Row Level security.
 We'll check with tests if we got it right in the end.
 
 
-### Session-based authentication
+### Authentication hook
 
-PostgREST will provide cookie values under the `request.cookie.*` variables. In
-this case, we will read the `session_token` cookie, if it exists. The function
+TODO: The auth hook should not be exposed with the API
+
+For each request, PostgREST will provide cookie values under the 
+`request.cookie.*` variables. In this authentication hook, we will 
+read the `session_token` cookie, if it exists. The function
 will switch roles and set the appropriate `user_id` if the session as
 identified by the token is valid.
 
@@ -743,6 +748,7 @@ create function api.authenticate()
                 perform set_config('app.user_id', session_user_id::text, true);
             else
                 set local role to anonymous;
+                perform set_config('app.user_id', '', true);
             end if;
         end;
     $$;
@@ -753,6 +759,12 @@ comment on function api.authenticate is
 grant execute on function api.authenticate to authenticator;
 
 ```
+
+We need to take care to use `set local ...` statements or the function
+`set_config(..., ..., true)` in order to absolutely make sure that we don't leak
+settings between requests. Those variants set variables that are valid
+only for the current transaction and PostgREST runs each request in its own
+transaction.
 
 We will configure PostgREST to run this function before every request in
 [`postgrest.conf`](postgrest.conf) using `pre-request = "api.authenticate"`.
